@@ -17,7 +17,7 @@ func TestNewClient(t *testing.T) {
 	t.Parallel()
 
 	token := "ghp_test123"
-	client := NewClient(token)
+	client := NewClient(token, nil)
 
 	if client == nil {
 		t.Fatal("NewClient returned nil")
@@ -53,7 +53,7 @@ func TestAuthenticatedUser_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	// Override the base URL by creating a custom request
 	originalURL := "https://api.github.com/user"
 	client.httpClient.Transport = &redirectTransport{
@@ -81,7 +81,7 @@ func TestAuthenticatedUser_Unauthorized(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("invalid-token")
+	client := NewClient("invalid-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user",
 		to:   server.URL + "/user",
@@ -114,7 +114,7 @@ func TestAuthenticatedUser_RateLimit(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user",
 		to:   server.URL + "/user",
@@ -151,7 +151,7 @@ func TestAuthenticatedUser_ServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user",
 		to:   server.URL + "/user",
@@ -180,7 +180,7 @@ func TestAuthenticatedUser_EmptyUsername(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user",
 		to:   server.URL + "/user",
@@ -220,7 +220,7 @@ func TestAppInstallationInfo_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("ghs_test-app-token")
+	client := NewClient("ghs_test-app-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/installation/repositories",
 		to:   server.URL + "/installation/repositories",
@@ -249,7 +249,7 @@ func TestAppInstallationInfo_NotAnAppToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("ghp_user-token")
+	client := NewClient("ghp_user-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/installation/repositories",
 		to:   server.URL + "/installation/repositories",
@@ -278,7 +278,7 @@ func TestAppInstallationInfo_NoRepositories(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("ghs_test-token")
+	client := NewClient("ghs_test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/installation/repositories",
 		to:   server.URL + "/installation/repositories",
@@ -318,7 +318,7 @@ func TestUserAndOrgs_AppToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("ghs_app-token")
+	client := NewClient("ghs_app-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/installation/repositories",
 		to:   server.URL + "/installation/repositories",
@@ -361,7 +361,7 @@ func TestUserAndOrgs_UserToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("ghp_user-token")
+	client := NewClient("ghp_user-token", nil)
 	client.httpClient.Transport = &multiPathTransport{server: server}
 
 	ctx := context.Background()
@@ -399,7 +399,7 @@ func TestValidateOrgMembership_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &multiPathTransport{server: server}
 
 	ctx := context.Background()
@@ -436,7 +436,7 @@ func TestValidateOrgMembership_NotMember(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &multiPathTransport{server: server}
 
 	ctx := context.Background()
@@ -453,7 +453,7 @@ func TestValidateOrgMembership_NotMember(t *testing.T) {
 func TestValidateOrgMembership_EmptyOrgName(t *testing.T) {
 	t.Parallel()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	ctx := context.Background()
 
 	_, _, err := client.ValidateOrgMembership(ctx, "")
@@ -469,7 +469,7 @@ func TestValidateOrgMembership_EmptyOrgName(t *testing.T) {
 func TestValidateOrgMembership_InvalidOrgFormat(t *testing.T) {
 	t.Parallel()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	ctx := context.Background()
 
 	invalidNames := []string{
@@ -511,7 +511,7 @@ func TestValidateOrgMembership_CaseInsensitive(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &multiPathTransport{server: server}
 
 	ctx := context.Background()
@@ -539,7 +539,7 @@ func TestFindPRsForCommit_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &multiPathTransport{server: server}
 
 	ctx := context.Background()
@@ -576,7 +576,7 @@ func TestFindPRsForCommit_EmptyResultRetry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &multiPathTransport{server: server}
 
 	ctx := context.Background()
@@ -602,7 +602,7 @@ func TestFindPRsForCommit_NotFound(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &multiPathTransport{server: server}
 
 	ctx := context.Background()
@@ -624,7 +624,7 @@ func TestFindPRsForCommit_Unauthorized(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("invalid-token")
+	client := NewClient("invalid-token", nil)
 	client.httpClient.Transport = &multiPathTransport{server: server}
 
 	ctx := context.Background()
@@ -655,7 +655,7 @@ func TestUserOrganizations_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user/orgs",
 		to:   server.URL + "/user/orgs",
@@ -684,7 +684,7 @@ func TestUserOrganizations_RateLimit(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user/orgs",
 		to:   server.URL + "/user/orgs",
@@ -745,7 +745,7 @@ func TestContextCancellation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user",
 		to:   server.URL + "/user",
@@ -771,7 +771,7 @@ func TestMalformedJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user",
 		to:   server.URL + "/user",
@@ -799,7 +799,7 @@ func TestResponseBodyReadError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	// Use a custom transport with very small timeout to trigger error
 	client.httpClient.Timeout = 1 * time.Nanosecond
 	client.httpClient.Transport = &redirectTransport{
@@ -826,7 +826,7 @@ func TestLargeResponseBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user",
 		to:   server.URL + "/user",
@@ -876,7 +876,7 @@ func TestUnexpectedStatusCodes(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := NewClient("test-token")
+			client := NewClient("test-token", nil)
 			client.httpClient.Transport = &redirectTransport{
 				from: "https://api.github.com/user",
 				to:   server.URL + "/user",
@@ -1063,7 +1063,7 @@ func TestAppInstallationInfo_ServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("ghs_test-token")
+	client := NewClient("ghs_test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/installation/repositories",
 		to:   server.URL + "/installation/repositories",
@@ -1092,7 +1092,7 @@ func TestAppInstallationInfo_Forbidden(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("ghp_user-token")
+	client := NewClient("ghp_user-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/installation/repositories",
 		to:   server.URL + "/installation/repositories",
@@ -1117,7 +1117,7 @@ func TestAppInstallationInfo_Unauthorized(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("invalid-token")
+	client := NewClient("invalid-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/installation/repositories",
 		to:   server.URL + "/installation/repositories",
@@ -1152,7 +1152,7 @@ func TestUserAndOrgs_AppTokenOnUserAccount(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("ghs_app-token")
+	client := NewClient("ghs_app-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/installation/repositories",
 		to:   server.URL + "/installation/repositories",
@@ -1180,7 +1180,7 @@ func TestUserOrganizations_Unauthorized(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("invalid-token")
+	client := NewClient("invalid-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user/orgs",
 		to:   server.URL + "/user/orgs",
@@ -1205,7 +1205,7 @@ func TestUserOrganizations_Forbidden(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user/orgs",
 		to:   server.URL + "/user/orgs",
@@ -1238,7 +1238,7 @@ func TestUserOrganizations_ServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user/orgs",
 		to:   server.URL + "/user/orgs",
@@ -1267,7 +1267,7 @@ func TestUserOrganizations_MalformedJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user/orgs",
 		to:   server.URL + "/user/orgs",
@@ -1294,7 +1294,7 @@ func TestFindPRsForCommit_BadGateway(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &multiPathTransport{server: server}
 
 	ctx := context.Background()
@@ -1317,7 +1317,7 @@ func TestFindPRsForCommit_MalformedJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &multiPathTransport{server: server}
 
 	ctx := context.Background()
@@ -1340,7 +1340,7 @@ func TestAuthenticatedUser_Forbidden(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user",
 		to:   server.URL + "/user",
@@ -1372,7 +1372,7 @@ func TestAuthenticatedUser_BadGateway(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user",
 		to:   server.URL + "/user",
@@ -1402,7 +1402,7 @@ func TestAuthenticatedUser_ServiceUnavailable(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user",
 		to:   server.URL + "/user",
@@ -1428,7 +1428,7 @@ func TestAppInstallationInfo_MalformedJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("ghs_test-token")
+	client := NewClient("ghs_test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/installation/repositories",
 		to:   server.URL + "/installation/repositories",
@@ -1475,7 +1475,7 @@ func TestUserAndOrgs_TokenTypeDetection(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := NewClient(tt.token)
+			client := NewClient(tt.token, nil)
 			client.httpClient.Transport = &multiPathTransport{server: server}
 
 			ctx := context.Background()
@@ -1497,7 +1497,7 @@ func TestFindPRsForCommit_ServiceUnavailable(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &multiPathTransport{server: server}
 
 	ctx := context.Background()
@@ -1519,7 +1519,7 @@ func TestFindPRsForCommit_Forbidden(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &multiPathTransport{server: server}
 
 	ctx := context.Background()
@@ -1549,7 +1549,7 @@ func TestUserOrganizations_BadGateway(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user/orgs",
 		to:   server.URL + "/user/orgs",
@@ -1594,7 +1594,7 @@ func TestAppInstallationInfo_BadGateway(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("ghs_test-token")
+	client := NewClient("ghs_test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/installation/repositories",
 		to:   server.URL + "/installation/repositories",
@@ -1626,7 +1626,7 @@ func TestFindPRsForCommit_PersistentEmptyResult(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &multiPathTransport{server: server}
 
 	ctx := context.Background()
@@ -1668,7 +1668,7 @@ func TestFindPRsForCommit_NetworkError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &multiPathTransport{server: server}
 
 	ctx := context.Background()
@@ -1705,7 +1705,7 @@ func TestUserOrganizations_RateLimitRetry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user/orgs",
 		to:   server.URL + "/user/orgs",
@@ -1750,7 +1750,7 @@ func TestAppInstallationInfo_NetworkError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/installation/repositories",
 		to:   server.URL + "/installation/repositories",
@@ -1795,7 +1795,7 @@ func TestUserOrganizations_NetworkError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-token")
+	client := NewClient("test-token", nil)
 	client.httpClient.Transport = &redirectTransport{
 		from: "https://api.github.com/user/orgs",
 		to:   server.URL + "/user/orgs",

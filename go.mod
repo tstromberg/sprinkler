@@ -1,6 +1,6 @@
 module github.com/codeGROOVE-dev/sprinkler
 
-go 1.24.0
+go 1.25.4
 
 require (
 	github.com/codeGROOVE-dev/retry v1.3.1
@@ -8,4 +8,8 @@ require (
 	golang.org/x/net v0.48.0
 )
 
-require golang.org/x/text v0.32.0 // indirect
+require (
+	github.com/codeGROOVE-dev/fido v1.10.0 // indirect
+	github.com/puzpuzpuz/xsync/v4 v4.2.0 // indirect
+	golang.org/x/text v0.32.0 // indirect
+)
