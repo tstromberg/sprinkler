@@ -1,6 +1,7 @@
 package srv
 
 import (
+	"context"
 	"testing"
 )
 
@@ -234,7 +235,7 @@ func TestWildcardOrganizationValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.sub.Validate()
+			err := tt.sub.Validate(context.Background(), nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}

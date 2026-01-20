@@ -14,8 +14,12 @@ import (
 
 	"golang.org/x/net/websocket"
 
+	"github.com/codeGROOVE-dev/sprinkler/pkg/gitea"
+	"github.com/codeGROOVE-dev/sprinkler/pkg/gitee"
 	"github.com/codeGROOVE-dev/sprinkler/pkg/github"
+	"github.com/codeGROOVE-dev/sprinkler/pkg/gitlab"
 	"github.com/codeGROOVE-dev/sprinkler/pkg/logger"
+	"github.com/codeGROOVE-dev/sprinkler/pkg/platform"
 	"github.com/codeGROOVE-dev/sprinkler/pkg/security"
 )
 
@@ -24,34 +28,28 @@ const (
 	pingInterval        = 54 * time.Second
 	readTimeout         = 90 * time.Second // Must be > pingInterval + response time to avoid false timeouts
 	writeTimeout        = 10 * time.Second
-	minTokenLength      = 40   // Minimum GitHub token length
-	maxTokenLength      = 255  // Maximum GitHub token length
+	minTokenLength      = 20   // Minimum token length (reduced to support GitLab/Gitea)
+	maxTokenLength      = 255  // Maximum token length
 	maxSubscriptionSize = 8192 // Maximum subscription message size (8KB)
 )
 
-// GitHub token validation regex
-// Matches common GitHub token patterns:
-// - ghp_* (Personal access tokens)
-// - gho_* (OAuth tokens)
-// - ghs_* (GitHub server tokens)
-// - github_pat_* (Fine-grained PATs).
-var githubTokenPattern = regexp.MustCompile(
-	`^(ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|ghs_[a-zA-Z0-9]{36}|` +
-		`github_pat_[a-zA-Z0-9_]{36,255}|[a-zA-Z0-9]{40})$`,
-)
+// Token validation regex (relaxed to support multiple platforms)
+// Matches common token patterns from GitHub, GitLab, and Gitea.
+var tokenPattern = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
 
 // WebSocketHandler handles WebSocket connections.
 type WebSocketHandler struct {
-	hub                 *Hub
-	connLimiter         *security.ConnectionLimiter
-	allowedEventsMap    map[string]bool
-	githubClientFactory func(token string) github.APIClient
-	allowedEvents       []string
-	testMode            bool
+	hub                   *Hub
+	connLimiter           *security.ConnectionLimiter
+	allowedEventsMap      map[string]bool
+	githubClientFactory   func(token string) github.APIClient
+	allowedEvents         []string
+	customAllowedBaseURLs []string
+	testMode              bool
 }
 
 // NewWebSocketHandler creates a new WebSocket handler.
-func NewWebSocketHandler(h *Hub, connLimiter *security.ConnectionLimiter, allowedEvents []string) *WebSocketHandler {
+func NewWebSocketHandler(h *Hub, connLimiter *security.ConnectionLimiter, allowedEvents []string, customBaseURLs []string) *WebSocketHandler {
 	// Build map for O(1) event type lookups
 	var allowedMap map[string]bool
 	if allowedEvents != nil {
@@ -62,21 +60,22 @@ func NewWebSocketHandler(h *Hub, connLimiter *security.ConnectionLimiter, allowe
 	}
 
 	return &WebSocketHandler{
-		hub:              h,
-		connLimiter:      connLimiter,
-		allowedEvents:    allowedEvents,
-		allowedEventsMap: allowedMap,
+		hub:                   h,
+		connLimiter:           connLimiter,
+		allowedEvents:         allowedEvents,
+		allowedEventsMap:      allowedMap,
+		customAllowedBaseURLs: customBaseURLs,
 	}
 }
 
 // NewWebSocketHandlerForTest creates a WebSocket handler for testing that skips GitHub auth.
 func NewWebSocketHandlerForTest(h *Hub, connLimiter *security.ConnectionLimiter, allowedEvents []string) *WebSocketHandler {
-	handler := NewWebSocketHandler(h, connLimiter, allowedEvents)
+	handler := NewWebSocketHandler(h, connLimiter, allowedEvents, nil)
 	handler.testMode = true
 	return handler
 }
 
-// PreValidateAuth checks if the request has a valid GitHub token before WebSocket upgrade.
+// PreValidateAuth checks if the request has a valid token before WebSocket upgrade.
 // This allows us to return proper HTTP status codes before the connection is upgraded.
 func (h *WebSocketHandler) PreValidateAuth(r *http.Request) bool {
 	if h.testMode {
@@ -93,10 +92,10 @@ func (h *WebSocketHandler) PreValidateAuth(r *http.Request) bool {
 		return false
 	}
 
-	githubToken := strings.TrimPrefix(authHeader, bearerPrefix)
-	return len(githubToken) >= minTokenLength &&
-		len(githubToken) <= maxTokenLength &&
-		githubTokenPattern.MatchString(githubToken)
+	token := strings.TrimPrefix(authHeader, bearerPrefix)
+	return len(token) >= minTokenLength &&
+		len(token) <= maxTokenLength &&
+		tokenPattern.MatchString(token)
 }
 
 // userAgentFromContext extracts client name and version from the parsed User-Agent in context.
@@ -109,8 +108,8 @@ func userAgentFromContext(ws *websocket.Conn) (clientName, clientVersion string)
 	return "unknown", "unknown"
 }
 
-// extractGitHubToken extracts and validates the GitHub token from the request.
-func (h *WebSocketHandler) extractGitHubToken(ctx context.Context, ws *websocket.Conn, ip string) (string, bool) {
+// extractToken extracts and validates the API token from the request.
+func (h *WebSocketHandler) extractToken(ctx context.Context, ws *websocket.Conn, ip string) (string, bool) {
 	if h.testMode {
 		return "", true
 	}
@@ -141,10 +140,10 @@ func (h *WebSocketHandler) extractGitHubToken(ctx context.Context, ws *websocket
 		})
 		return "", false
 	}
-	githubToken := strings.TrimPrefix(authHeader, bearerPrefix)
+	token := strings.TrimPrefix(authHeader, bearerPrefix)
 
-	if len(githubToken) < minTokenLength || len(githubToken) > maxTokenLength || !githubTokenPattern.MatchString(githubToken) {
-		logger.Warn(ctx, "WebSocket authentication failed: invalid GitHub token format", logger.Fields{
+	if len(token) < minTokenLength || len(token) > maxTokenLength || !tokenPattern.MatchString(token) {
+		logger.Warn(ctx, "WebSocket authentication failed: invalid token format", logger.Fields{
 			"ip":             ip,
 			"user_agent":     ws.Request().UserAgent(),
 			"client_name":    clientName,
@@ -154,16 +153,33 @@ func (h *WebSocketHandler) extractGitHubToken(ctx context.Context, ws *websocket
 		return "", false
 	}
 
-	return githubToken, true
+	return token, true
 }
 
-// githubClient creates a GitHub API client using the factory if provided,
-// otherwise uses the default client constructor.
-func (h *WebSocketHandler) githubClient(token string) github.APIClient {
+// createAPIClient creates a platform-specific API client.
+// Uses factory if provided (for testing), otherwise creates appropriate client based on platform.
+func (h *WebSocketHandler) createAPIClient(token string, platformType platform.Type, baseURL string) github.APIClient {
 	if h.githubClientFactory != nil {
 		return h.githubClientFactory(token)
 	}
-	return github.NewClient(token, nil)
+
+	// Apply defaults if baseURL is empty
+	if baseURL == "" {
+		if url, ok := platform.DefaultBaseURLs[platformType]; ok {
+			baseURL = url
+		}
+	}
+
+	switch platformType {
+	case platform.GitLab:
+		return gitlab.NewClient(token, baseURL, nil)
+	case platform.Gitea:
+		return gitea.NewClient(token, baseURL, nil)
+	case platform.Gitee:
+		return gitee.NewClient(token, baseURL, nil)
+	default: // platform.GitHub or empty
+		return github.NewClient(token, nil)
+	}
 }
 
 // errorInfo holds error response details.
@@ -178,10 +194,10 @@ func determineErrorInfo(err error, username string, orgName string, userOrgs []s
 	errStr := err.Error()
 
 	switch {
-	case strings.Contains(errStr, "invalid GitHub token"):
+	case strings.Contains(errStr, "invalid") && (strings.Contains(errStr, "token") || strings.Contains(errStr, "Token")):
 		return errorInfo{
 			code:    "authentication_failed",
-			message: "Invalid GitHub token.",
+			message: "Invalid API token.",
 			reason:  "invalid_token",
 		}
 	case strings.Contains(errStr, "access forbidden"):
@@ -193,17 +209,17 @@ func determineErrorInfo(err error, username string, orgName string, userOrgs []s
 	case strings.Contains(errStr, "rate limit"):
 		return errorInfo{
 			code:    "rate_limit_exceeded",
-			message: "GitHub API rate limit exceeded. Try again later.",
+			message: "API rate limit exceeded. Try again later.",
 			reason:  "rate_limit",
 		}
 	case strings.Contains(errStr, "not a member"):
-		msg := fmt.Sprintf("You are not a member of organization '%s'.", orgName)
+		msg := fmt.Sprintf("You are not a member of organization/group '%s'.", orgName)
 		if username != "" {
 			if len(userOrgs) > 0 {
-				msg = fmt.Sprintf("User '%s' is not a member of organization '%s'. Member of: %s",
+				msg = fmt.Sprintf("User '%s' is not a member of organization/group '%s'. Member of: %s",
 					username, orgName, strings.Join(userOrgs, ", "))
 			} else {
-				msg = fmt.Sprintf("User '%s' is not a member of organization '%s'.", username, orgName)
+				msg = fmt.Sprintf("User '%s' is not a member of organization/group '%s'.", username, orgName)
 			}
 		}
 		return errorInfo{
@@ -317,21 +333,21 @@ func (*WebSocketHandler) handleAuthError(ctx context.Context, ws *websocket.Conn
 // validateWildcardOrg handles wildcard organization subscription.
 func (h *WebSocketHandler) validateWildcardOrg(
 	ctx context.Context, ws *websocket.Conn, sub *Subscription,
-	ghClient github.APIClient, githubToken, ip string,
+	apiClient github.APIClient, token, ip string,
 ) ([]string, error) {
-	logger.Info(ctx, "validating GitHub authentication for wildcard org subscription", logger.Fields{"ip": ip})
+	logger.Info(ctx, "validating authentication for wildcard org subscription", logger.Fields{"ip": ip, "platform": sub.Platform})
 
-	username, userOrgs, err := ghClient.UserAndOrgs(ctx)
+	username, userOrgs, err := apiClient.UserAndOrgs(ctx)
 	if err != nil {
 		return nil, h.handleAuthError(ctx, ws, err, authErrorParams{
-			githubToken: githubToken,
+			githubToken: token,
 			ip:          ip,
-			logContext:  "GitHub auth failed for wildcard org subscription",
+			logContext:  "API auth failed for wildcard org subscription",
 		})
 	}
 
-	logger.Info(ctx, "GitHub authentication successful for wildcard org subscription", logger.Fields{
-		"ip": ip, "username": username, "org_count": len(userOrgs),
+	logger.Info(ctx, "authentication successful for wildcard org subscription", logger.Fields{
+		"ip": ip, "username": username, "org_count": len(userOrgs), "platform": sub.Platform,
 	})
 
 	sub.Username = username
@@ -341,26 +357,26 @@ func (h *WebSocketHandler) validateWildcardOrg(
 // validateSpecificOrg handles specific organization membership validation.
 func (h *WebSocketHandler) validateSpecificOrg(
 	ctx context.Context, ws *websocket.Conn, sub *Subscription,
-	ghClient github.APIClient, githubToken, ip string,
+	apiClient github.APIClient, token, ip string,
 ) ([]string, error) {
-	logger.Info(ctx, "validating GitHub authentication and org membership", logger.Fields{
-		"ip": ip, "org": sub.Organization,
+	logger.Info(ctx, "validating authentication and org membership", logger.Fields{
+		"ip": ip, "org": sub.Organization, "platform": sub.Platform,
 	})
 
-	username, userOrgs, err := ghClient.ValidateOrgMembership(ctx, sub.Organization)
+	username, userOrgs, err := apiClient.ValidateOrgMembership(ctx, sub.Organization)
 	if err != nil {
 		return nil, h.handleAuthError(ctx, ws, err, authErrorParams{
-			githubToken: githubToken,
+			githubToken: token,
 			ip:          ip,
 			username:    username,
 			orgName:     sub.Organization,
 			userOrgs:    userOrgs,
-			logContext:  "GitHub auth/org membership validation failed",
+			logContext:  "API auth/org membership validation failed",
 		})
 	}
 
-	logger.Info(ctx, "GitHub authentication and org membership validated successfully", logger.Fields{
-		"ip": ip, "org": sub.Organization, "username": username, "org_count": len(userOrgs),
+	logger.Info(ctx, "authentication and org membership validated successfully", logger.Fields{
+		"ip": ip, "org": sub.Organization, "username": username, "org_count": len(userOrgs), "platform": sub.Platform,
 	})
 
 	sub.Username = username
@@ -370,23 +386,23 @@ func (h *WebSocketHandler) validateSpecificOrg(
 // validateNoOrg handles authentication when no specific organization is requested.
 func (h *WebSocketHandler) validateNoOrg(
 	ctx context.Context, ws *websocket.Conn, sub *Subscription,
-	ghClient github.APIClient, githubToken, ip string,
+	apiClient github.APIClient, token, ip string,
 ) ([]string, error) {
-	logger.Info(ctx, "validating GitHub authentication (no org specified in subscription)", logger.Fields{
-		"ip": ip, "subscription_org": sub.Organization,
+	logger.Info(ctx, "validating authentication (no org specified in subscription)", logger.Fields{
+		"ip": ip, "subscription_org": sub.Organization, "platform": sub.Platform,
 	})
 
-	username, userOrgs, err := ghClient.UserAndOrgs(ctx)
+	username, userOrgs, err := apiClient.UserAndOrgs(ctx)
 	if err != nil {
 		return nil, h.handleAuthError(ctx, ws, err, authErrorParams{
-			githubToken: githubToken,
+			githubToken: token,
 			ip:          ip,
-			logContext:  "GitHub auth failed (no specific org)",
+			logContext:  "API auth failed (no specific org)",
 		})
 	}
 
-	logger.Info(ctx, "GitHub authentication successful", logger.Fields{
-		"ip": ip, "username": username, "org_count": len(userOrgs),
+	logger.Info(ctx, "authentication successful", logger.Fields{
+		"ip": ip, "username": username, "org_count": len(userOrgs), "platform": sub.Platform,
 	})
 
 	sub.Username = username
@@ -394,7 +410,7 @@ func (h *WebSocketHandler) validateNoOrg(
 	// For GitHub Apps with no org specified, auto-set to their installation org
 	if strings.HasPrefix(username, "app[") && sub.Organization == "" && len(userOrgs) == 1 {
 		sub.Organization = userOrgs[0]
-		logger.Info(ctx, "auto-setting GitHub App subscription to installation org", logger.Fields{
+		logger.Info(ctx, "auto-setting App subscription to installation org", logger.Fields{
 			"ip": ip, "org": sub.Organization, "app": username,
 		})
 	}
@@ -404,7 +420,7 @@ func (h *WebSocketHandler) validateNoOrg(
 
 // validateAuth validates the GitHub authentication and organization membership.
 // Returns the list of organizations the user is a member of.
-func (h *WebSocketHandler) validateAuth(ctx context.Context, ws *websocket.Conn, sub *Subscription, githubToken, ip string) ([]string, error) {
+func (h *WebSocketHandler) validateAuth(ctx context.Context, ws *websocket.Conn, sub *Subscription, token, ip string) ([]string, error) {
 	if h.testMode {
 		// In test mode, Username is already set from the test subscription
 		// Return the single org they're subscribing to if specified
@@ -414,22 +430,20 @@ func (h *WebSocketHandler) validateAuth(ctx context.Context, ws *websocket.Conn,
 		return []string{}, nil
 	}
 
-	// Create GitHub client using factory if provided, otherwise use default
-	var ghClient github.APIClient
-	if h.githubClientFactory != nil {
-		ghClient = h.githubClientFactory(githubToken)
-	} else {
-		ghClient = github.NewClient(githubToken, nil)
-	}
+	// Determine platform from subscription (defaults to GitHub)
+	platformType := platform.FromString(sub.Platform)
+
+	// Create platform-specific API client
+	apiClient := h.createAPIClient(token, platformType, sub.BaseURL)
 
 	if sub.Organization != "" {
 		if sub.Organization == "*" {
-			return h.validateWildcardOrg(ctx, ws, sub, ghClient, githubToken, ip)
+			return h.validateWildcardOrg(ctx, ws, sub, apiClient, token, ip)
 		}
-		return h.validateSpecificOrg(ctx, ws, sub, ghClient, githubToken, ip)
+		return h.validateSpecificOrg(ctx, ws, sub, apiClient, token, ip)
 	}
 
-	return h.validateNoOrg(ctx, ws, sub, ghClient, githubToken, ip)
+	return h.validateNoOrg(ctx, ws, sub, apiClient, token, ip)
 }
 
 // wsCloser wraps a WebSocket connection with sync.Once to prevent double-close.
@@ -553,13 +567,13 @@ func (h *WebSocketHandler) Handle(ws *websocket.Conn) {
 		}
 	}()
 
-	githubToken, ok := h.extractGitHubToken(ctx, ws, ip)
+	apiToken, ok := h.extractToken(ctx, ws, ip)
 	if !ok {
 		// Send 403 error response to client
 		errorResp := map[string]string{
 			"type":    "error",
 			"error":   "authentication_failed",
-			"message": "Invalid or missing GitHub token. Please provide a valid token in the Authorization header.",
+			"message": "Invalid or missing API token. Please provide a valid token in the Authorization header.",
 		}
 
 		// Try to send error response
@@ -637,7 +651,7 @@ func (h *WebSocketHandler) Handle(ws *websocket.Conn) {
 	// Organization is optional for PR subscriptions and UserEventsOnly mode
 
 	// Validate subscription data
-	if err := sub.Validate(); err != nil {
+	if err := sub.Validate(ctx, h.customAllowedBaseURLs); err != nil {
 		// Send error response to client
 		errorResp := map[string]string{
 			"type":    "error",
@@ -703,7 +717,7 @@ func (h *WebSocketHandler) Handle(ws *websocket.Conn) {
 	}
 
 	// Validate authentication and set username
-	userOrgs, err := h.validateAuth(ctx, ws, &sub, githubToken, ip)
+	userOrgs, err := h.validateAuth(ctx, ws, &sub, apiToken, ip)
 	if err != nil {
 		// Error response already sent by validateAuth
 		logger.Warn(ctx, "WebSocket connection rejected: authentication/authorization failed", logger.Fields{
@@ -717,7 +731,7 @@ func (h *WebSocketHandler) Handle(ws *websocket.Conn) {
 		return
 	}
 
-	// Fetch user's GitHub Marketplace tier
+	// Fetch user's subscription tier
 	var tier github.Tier
 	if cached, ok := h.hub.tierCache.Get(sub.Username); ok {
 		tier = cached
@@ -726,20 +740,23 @@ func (h *WebSocketHandler) Handle(ws *websocket.Conn) {
 			"tier":     string(tier),
 		})
 	} else {
-		// Create GitHub client for tier lookup
-		ghClient := h.githubClient(githubToken)
-		fetchedTier, tierErr := ghClient.UserTier(ctx, sub.Username)
+		// Create API client for tier lookup
+		platformType := platform.FromString(sub.Platform)
+		apiClient := h.createAPIClient(apiToken, platformType, sub.BaseURL)
+		fetchedTier, tierErr := apiClient.UserTier(ctx, sub.Username)
 		if tierErr != nil {
-			logger.Warn(ctx, "failed to fetch marketplace tier, defaulting to free", logger.Fields{
+			logger.Warn(ctx, "failed to fetch tier, defaulting to free", logger.Fields{
 				"username": sub.Username,
+				"platform": sub.Platform,
 				"error":    tierErr.Error(),
 			})
 			tier = github.TierFree
 		} else {
 			tier = fetchedTier
 			h.hub.tierCache.Set(sub.Username, tier)
-			logger.Info(ctx, "fetched marketplace tier", logger.Fields{
+			logger.Info(ctx, "fetched tier", logger.Fields{
 				"username": sub.Username,
+				"platform": sub.Platform,
 				"tier":     string(tier),
 			})
 		}

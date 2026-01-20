@@ -27,7 +27,7 @@ func TestPreValidateAuth(t *testing.T) {
 	connLimiter := security.NewConnectionLimiter(10, 50)
 	defer connLimiter.Stop()
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	tests := []struct {
 		name       string
@@ -261,7 +261,7 @@ func TestNewWebSocketHandler(t *testing.T) {
 	defer connLimiter.Stop()
 
 	t.Run("with allowed events", func(t *testing.T) {
-		handler := NewWebSocketHandler(hub, connLimiter, []string{"pull_request", "check_run"})
+		handler := NewWebSocketHandler(hub, connLimiter, []string{"pull_request", "check_run"}, nil)
 		if handler == nil {
 			t.Fatal("Expected non-nil handler")
 		}
@@ -274,7 +274,7 @@ func TestNewWebSocketHandler(t *testing.T) {
 	})
 
 	t.Run("without allowed events", func(t *testing.T) {
-		handler := NewWebSocketHandler(hub, connLimiter, nil)
+		handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 		if handler == nil {
 			t.Fatal("Expected non-nil handler")
 		}
@@ -311,7 +311,7 @@ func TestDetermineErrorInfo(t *testing.T) {
 			username: "user1",
 			orgName:  "org1",
 			wantCode: "authentication_failed",
-			wantMsg:  "Invalid GitHub token.",
+			wantMsg:  "Invalid API token.",
 		},
 		{
 			name:     "access forbidden",
@@ -327,7 +327,7 @@ func TestDetermineErrorInfo(t *testing.T) {
 			username: "user1",
 			orgName:  "org1",
 			wantCode: "rate_limit_exceeded",
-			wantMsg:  "GitHub API rate limit exceeded. Try again later.",
+			wantMsg:  "API rate limit exceeded. Try again later.",
 		},
 		{
 			name:     "not a member with username",
@@ -336,7 +336,7 @@ func TestDetermineErrorInfo(t *testing.T) {
 			orgName:  "org1",
 			userOrgs: []string{"other-org"},
 			wantCode: "access_denied",
-			wantMsg:  "User 'user1' is not a member of organization 'org1'. Member of: other-org",
+			wantMsg:  "User 'user1' is not a member of organization/group 'org1'. Member of: other-org",
 		},
 		{
 			name:     "not a member without user orgs",
@@ -345,7 +345,7 @@ func TestDetermineErrorInfo(t *testing.T) {
 			orgName:  "org1",
 			userOrgs: nil,
 			wantCode: "access_denied",
-			wantMsg:  "User 'user1' is not a member of organization 'org1'.",
+			wantMsg:  "User 'user1' is not a member of organization/group 'org1'.",
 		},
 		{
 			name:     "not a member without username",
@@ -353,7 +353,7 @@ func TestDetermineErrorInfo(t *testing.T) {
 			username: "",
 			orgName:  "org1",
 			wantCode: "access_denied",
-			wantMsg:  "You are not a member of organization 'org1'.",
+			wantMsg:  "You are not a member of organization/group 'org1'.",
 		},
 		{
 			name:     "unknown error",
@@ -431,7 +431,7 @@ func TestHandleInvalidAuthToken(t *testing.T) {
 	defer connLimiter.Stop()
 
 	// Use non-test mode to require auth
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	// Create test server
 	server := httptest.NewServer(websocket.Handler(handler.Handle))
@@ -703,10 +703,10 @@ func TestExtractGitHubTokenInTestMode(t *testing.T) {
 	handler := NewWebSocketHandlerForTest(hub, connLimiter, nil)
 
 	server := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
-		// In test mode, extractGitHubToken should return true even without auth
-		token, ok := handler.extractGitHubToken(ctx, ws, "127.0.0.1")
+		// In test mode, extractToken should return true even without auth
+		token, ok := handler.extractToken(ctx, ws, "127.0.0.1")
 		if !ok {
-			t.Error("Expected extractGitHubToken to return true in test mode")
+			t.Error("Expected extractToken to return true in test mode")
 		}
 		if token != "" {
 			t.Error("Expected empty token in test mode")
@@ -1648,7 +1648,7 @@ func TestClientRunDirectly(t *testing.T) {
 	}
 }
 
-// TestExtractGitHubTokenMissingHeader tests extractGitHubToken with no auth header.
+// TestExtractGitHubTokenMissingHeader tests extractToken with no auth header.
 func TestExtractGitHubTokenMissingHeader(t *testing.T) {
 	ctx := context.Background()
 	hub := NewHub(false)
@@ -1659,7 +1659,7 @@ func TestExtractGitHubTokenMissingHeader(t *testing.T) {
 	defer connLimiter.Stop()
 
 	// Use non-test mode to test actual auth extraction
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	server := httptest.NewServer(websocket.Handler(handler.Handle))
 	defer server.Close()
@@ -1680,7 +1680,7 @@ func TestExtractGitHubTokenMissingHeader(t *testing.T) {
 	// Test passes - we triggered the missing header path
 }
 
-// TestExtractGitHubTokenInvalidPrefix tests extractGitHubToken with wrong prefix.
+// TestExtractGitHubTokenInvalidPrefix tests extractToken with wrong prefix.
 func TestExtractGitHubTokenInvalidPrefix(t *testing.T) {
 	ctx := context.Background()
 	hub := NewHub(false)
@@ -1690,7 +1690,7 @@ func TestExtractGitHubTokenInvalidPrefix(t *testing.T) {
 	connLimiter := security.NewConnectionLimiter(10, 50)
 	defer connLimiter.Stop()
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	server := httptest.NewServer(websocket.Handler(handler.Handle))
 	defer server.Close()
@@ -1713,7 +1713,7 @@ func TestExtractGitHubTokenInvalidPrefix(t *testing.T) {
 	_ = websocket.JSON.Receive(ws, &response)
 }
 
-// TestExtractGitHubTokenInvalidFormat tests extractGitHubToken with invalid token format.
+// TestExtractGitHubTokenInvalidFormat tests extractToken with invalid token format.
 func TestExtractGitHubTokenInvalidFormat(t *testing.T) {
 	ctx := context.Background()
 	hub := NewHub(false)
@@ -1723,7 +1723,7 @@ func TestExtractGitHubTokenInvalidFormat(t *testing.T) {
 	connLimiter := security.NewConnectionLimiter(10, 50)
 	defer connLimiter.Stop()
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	server := httptest.NewServer(websocket.Handler(handler.Handle))
 	defer server.Close()
@@ -1755,7 +1755,7 @@ func TestValidateWildcardOrg(t *testing.T) {
 	connLimiter := security.NewConnectionLimiter(10, 50)
 	defer connLimiter.Stop()
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	// Create mock GitHub client
 	mockClient := &github.MockClient{
@@ -1818,7 +1818,7 @@ func TestValidateSpecificOrg(t *testing.T) {
 	connLimiter := security.NewConnectionLimiter(10, 50)
 	defer connLimiter.Stop()
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	mockClient := &github.MockClient{
 		Username: "testuser",
@@ -1879,7 +1879,7 @@ func TestValidateSpecificOrgNotMember(t *testing.T) {
 	connLimiter := security.NewConnectionLimiter(10, 50)
 	defer connLimiter.Stop()
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	mockClient := &github.MockClient{
 		Username: "testuser",
@@ -1932,7 +1932,7 @@ func TestValidateNoOrg(t *testing.T) {
 	connLimiter := security.NewConnectionLimiter(10, 50)
 	defer connLimiter.Stop()
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	mockClient := &github.MockClient{
 		Username: "testuser",
@@ -1989,7 +1989,7 @@ func TestValidateNoOrgAuthError(t *testing.T) {
 	connLimiter := security.NewConnectionLimiter(10, 50)
 	defer connLimiter.Stop()
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	// Mock that returns error
 	mockClient := &github.MockClient{
@@ -2046,7 +2046,7 @@ func TestValidateSpecificOrgAccessDenied(t *testing.T) {
 	connLimiter := security.NewConnectionLimiter(10, 50)
 	defer connLimiter.Stop()
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	// Mock that returns "access forbidden" error
 	mockClient := &github.MockClient{
@@ -2103,7 +2103,7 @@ func TestRateLimitError(t *testing.T) {
 	connLimiter := security.NewConnectionLimiter(10, 50)
 	defer connLimiter.Stop()
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	// Mock that returns rate limit error
 	mockClient := &github.MockClient{
@@ -2162,7 +2162,7 @@ func TestDefaultEventTypes(t *testing.T) {
 
 	// Create handler with allowed events
 	allowedEvents := []string{"pull_request", "issues"}
-	handler := NewWebSocketHandler(hub, connLimiter, allowedEvents)
+	handler := NewWebSocketHandler(hub, connLimiter, allowedEvents, nil)
 
 	mockClient := &github.MockClient{
 		Username: "testuser",
@@ -2225,7 +2225,7 @@ func TestHandleAuthError(t *testing.T) {
 	connLimiter := security.NewConnectionLimiter(10, 50)
 	defer connLimiter.Stop()
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	// Create mock that returns an error
 	mockClient := &github.MockClient{
@@ -2284,7 +2284,7 @@ func TestEventTypeNotAllowed(t *testing.T) {
 
 	// Create handler with allowed events list
 	allowedEvents := []string{"pull_request", "push"}
-	handler := NewWebSocketHandler(hub, connLimiter, allowedEvents)
+	handler := NewWebSocketHandler(hub, connLimiter, allowedEvents, nil)
 
 	mockClient := &github.MockClient{
 		Username: "testuser",
@@ -2342,7 +2342,7 @@ func TestGitHubAppAutoOrg(t *testing.T) {
 	connLimiter := security.NewConnectionLimiter(10, 50)
 	defer connLimiter.Stop()
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	// Mock GitHub App username with single org
 	mockClient := &github.MockClient{
@@ -2405,7 +2405,7 @@ func TestGitHubAppMultipleOrgsNoAutoSet(t *testing.T) {
 	connLimiter := security.NewConnectionLimiter(10, 50)
 	defer connLimiter.Stop()
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	// Mock GitHub App username with multiple orgs (should NOT auto-set)
 	mockClient := &github.MockClient{
@@ -2468,7 +2468,7 @@ func TestWildcardWithMultipleOrgs(t *testing.T) {
 	connLimiter := security.NewConnectionLimiter(10, 50)
 	defer connLimiter.Stop()
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 
 	mockClient := &github.MockClient{
 		Username: "multiuser",
@@ -2635,7 +2635,7 @@ func TestHandleAuthErrorWithSendFailure(t *testing.T) {
 		Err: errors.New("auth failed"),
 	}
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 	handler.githubClientFactory = func(token string) github.APIClient {
 		return mockGHClient
 	}
@@ -2753,7 +2753,7 @@ func TestValidateAuthConcurrentAccess(t *testing.T) {
 		Orgs:     []string{"org1", "org2"},
 	}
 
-	handler := NewWebSocketHandler(hub, connLimiter, nil)
+	handler := NewWebSocketHandler(hub, connLimiter, nil, nil)
 	handler.githubClientFactory = func(token string) github.APIClient {
 		return mockGHClient
 	}

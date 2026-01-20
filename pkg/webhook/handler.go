@@ -1,5 +1,6 @@
-// Package webhook provides HTTP handlers for processing GitHub webhook events,
-// including signature validation and event extraction for broadcasting to subscribers.
+// Package webhook provides HTTP handlers for processing webhook events from
+// multiple Git platforms (GitHub, GitLab, Gitea), including signature validation
+// and event extraction for broadcasting to subscribers.
 package webhook
 
 import (
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/codeGROOVE-dev/sprinkler/pkg/logger"
+	"github.com/codeGROOVE-dev/sprinkler/pkg/platform"
 	"github.com/codeGROOVE-dev/sprinkler/pkg/srv"
 )
 
@@ -48,11 +50,31 @@ func NewHandler(h *srv.Hub, secret string, allowedEvents []string) *Handler {
 	}
 }
 
-// ServeHTTP processes GitHub webhook events.
+// ServeHTTP processes webhook events from multiple platforms (GitHub, GitLab, Gitea).
 //
-//nolint:maintidx // Webhook processing requires comprehensive validation and error handling
+//nolint:maintidx,revive // Webhook processing requires comprehensive validation and error handling
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	// Detect platform from webhook headers
+	platformType := platform.DetectFromWebhookHeaders(r.Header)
+
+	// Extract platform-specific headers
+	var eventType, signature, deliveryID string
+	switch platformType {
+	case platform.GitLab:
+		eventType = r.Header.Get("X-Gitlab-Event")
+		signature = r.Header.Get("X-Gitlab-Token")
+		deliveryID = r.Header.Get("X-Gitlab-Event-UUID") //nolint:canonicalheader // GitLab webhook header
+	case platform.Gitea:
+		eventType = r.Header.Get("X-Gitea-Event")
+		signature = r.Header.Get("X-Gitea-Signature")
+		deliveryID = r.Header.Get("X-Gitea-Delivery")
+	default: // GitHub
+		eventType = r.Header.Get("X-GitHub-Event") //nolint:canonicalheader // GitHub webhook header
+		signature = r.Header.Get("X-Hub-Signature-256")
+		deliveryID = r.Header.Get("X-GitHub-Delivery") //nolint:canonicalheader // GitHub webhook header
+	}
 
 	// Log incoming webhook request details
 	logger.Info(ctx, "webhook request received", logger.Fields{
@@ -61,8 +83,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"remote_addr":  r.RemoteAddr,
 		"user_agent":   r.UserAgent(),
 		"content_type": r.Header.Get("Content-Type"),
-		"event_type":   r.Header.Get("X-GitHub-Event"),    //nolint:canonicalheader // GitHub webhook header
-		"delivery_id":  r.Header.Get("X-GitHub-Delivery"), //nolint:canonicalheader // GitHub webhook header
+		"platform":     platformType.String(),
+		"event_type":   eventType,
+		"delivery_id":  deliveryID,
 	})
 
 	if r.Method != http.MethodPost {
@@ -70,14 +93,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"method":      r.Method,
 			"remote_addr": r.RemoteAddr,
 			"path":        r.URL.Path,
+			"platform":    platformType.String(),
 		})
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	eventType := r.Header.Get("X-GitHub-Event") //nolint:canonicalheader // GitHub webhook header
-	signature := r.Header.Get("X-Hub-Signature-256")
-	deliveryID := r.Header.Get("X-GitHub-Delivery") //nolint:canonicalheader // GitHub webhook header
 
 	// Check if event type is allowed
 	if h.allowedEventsMap != nil && !h.allowedEventsMap[eventType] {
@@ -114,12 +134,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Verify signature
-	if !VerifySignature(body, signature, h.secret) {
+	// Verify signature (platform-specific)
+	if !verifySignature(platformType, body, signature, h.secret) {
 		logger.Warn(ctx, "webhook rejected: 401 Unauthorized - signature verification failed", logger.Fields{
 			"delivery_id":      deliveryID,
 			"event_type":       eventType,
 			"remote_addr":      r.RemoteAddr,
+			"platform":         platformType.String(),
 			"signature_exists": signature != "",
 			"secret_set":       h.secret != "",
 		})
@@ -146,8 +167,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		commitSHA = extractCommitSHA(eventType, payload)
 	}
 
-	// Extract PR URL
-	prURL := ExtractPRURL(ctx, eventType, payload)
+	// Extract PR URL (platform-specific)
+	prURL := extractPRURL(ctx, platformType, eventType, payload)
 	if prURL == "" {
 		// For non-check events, log payload and return early
 		if eventType != "check_run" && eventType != "check_suite" {
@@ -224,11 +245,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"delivery_id": deliveryID,
 				"pr_url":      prURL,
 			})
-		case !strings.Contains(prURL, "/pull/"):
-			logger.Warn(ctx, "pull_request event: URL not a PR URL", logger.Fields{
+		case !strings.Contains(prURL, "/pull/") && !strings.Contains(prURL, "/pulls/") && !strings.Contains(prURL, "/merge_requests/"):
+			logger.Warn(ctx, "pull_request event: URL not a PR/MR URL", logger.Fields{
 				"delivery_id": deliveryID,
 				"commit_sha":  truncateSHA(commitSHA),
 				"url":         prURL,
+				"platform":    platformType.String(),
 			})
 		default:
 			// Extract PR number inline (only used here)
@@ -279,12 +301,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // VerifySignature validates the GitHub webhook signature.
 // Uses constant-time operations to prevent timing attacks.
-func VerifySignature(payload []byte, signature, secret string) bool {
+// verifySignature verifies webhook signature based on platform type.
+func verifySignature(platformType platform.Type, payload []byte, signature, secret string) bool {
+	switch platformType {
+	case platform.GitLab:
+		// GitLab uses simple token comparison
+		return secret != "" && hmac.Equal([]byte(signature), []byte(secret))
+	case platform.Gitea, platform.Gitee:
+		// Gitea and Gitee use HMAC-SHA256 without "sha256=" prefix
+		return verifyHMACSHA256(payload, signature, secret)
+	default: // GitHub
+		return verifyGitHubSignature(payload, signature, secret)
+	}
+}
+
+// verifyGitHubSignature verifies GitHub webhook signature (HMAC-SHA256).
+func verifyGitHubSignature(payload []byte, signature, secret string) bool {
 	// Always compute HMAC first to maintain constant time
-	// This prevents timing attacks from distinguishing between:
-	// 1. Missing/empty secret
-	// 2. Wrong signature format
-	// 3. Invalid signature
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(payload)
 	expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
@@ -297,8 +330,38 @@ func VerifySignature(payload []byte, signature, secret string) bool {
 	return validFormat && validSecret && validSignature
 }
 
-// ExtractPRURL extracts the pull request URL from various event types.
-func ExtractPRURL(ctx context.Context, eventType string, payload map[string]any) string {
+// verifyHMACSHA256 verifies webhook signature using HMAC-SHA256 without prefix.
+// Used by Gitea and Gitee platforms.
+func verifyHMACSHA256(payload []byte, signature, secret string) bool {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(payload)
+	expected := hex.EncodeToString(mac.Sum(nil))
+	return secret != "" && hmac.Equal([]byte(signature), []byte(expected))
+}
+
+// VerifySignature is the legacy public function for GitHub signature verification.
+// Kept for backward compatibility with tests.
+//
+//nolint:revive // Function name intentionally similar to verifySignature for backward compatibility
+func VerifySignature(payload []byte, signature, secret string) bool {
+	return verifyGitHubSignature(payload, signature, secret)
+}
+
+// extractPRURL extracts the PR/MR URL based on platform and event type.
+func extractPRURL(ctx context.Context, platformType platform.Type, eventType string, payload map[string]any) string {
+	switch platformType {
+	case platform.GitLab:
+		return extractGitLabMRURL(eventType, payload)
+	case platform.Gitea, platform.Gitee:
+		// Gitea and Gitee use identical webhook payload structure
+		return extractGiteaPRURL(eventType, payload)
+	default: // GitHub
+		return extractGitHubPRURL(ctx, eventType, payload)
+	}
+}
+
+// extractGitHubPRURL extracts the pull request URL from GitHub events.
+func extractGitHubPRURL(ctx context.Context, eventType string, payload map[string]any) string {
 	switch eventType {
 	case "pull_request", "pull_request_review", "pull_request_review_comment":
 		if pr, ok := payload["pull_request"].(map[string]any); ok {
@@ -460,4 +523,59 @@ func truncateSHA(sha string) string {
 		return sha[:8]
 	}
 	return sha
+}
+
+// extractGitLabMRURL extracts the merge request URL from GitLab events.
+func extractGitLabMRURL(eventType string, payload map[string]any) string {
+	switch eventType {
+	case "Merge Request Hook":
+		if mr, ok := payload["object_attributes"].(map[string]any); ok {
+			if url, ok := mr["url"].(string); ok {
+				return url
+			}
+		}
+	case "Note Hook", "Pipeline Hook", "Job Hook":
+		// Comment on merge request or CI/CD events - extract MR URL if available
+		if mr, ok := payload["merge_request"].(map[string]any); ok {
+			if url, ok := mr["url"].(string); ok {
+				return url
+			}
+		}
+	default:
+		// Unsupported event type
+	}
+	return ""
+}
+
+// extractGiteaPRURL extracts the pull request URL from Gitea/Gitee events.
+// Gitea and Gitee use identical webhook payload structures.
+func extractGiteaPRURL(eventType string, payload map[string]any) string {
+	switch eventType {
+	case "pull_request", "pull_request_review", "pull_request_review_comment":
+		if pr, ok := payload["pull_request"].(map[string]any); ok {
+			if htmlURL, ok := pr["html_url"].(string); ok {
+				return htmlURL
+			}
+		}
+	case "issue_comment":
+		// issue_comment events can be on PRs too
+		if issue, ok := payload["issue"].(map[string]any); ok {
+			if _, isPR := issue["pull_request"]; isPR {
+				if htmlURL, ok := issue["html_url"].(string); ok {
+					return htmlURL
+				}
+			}
+		}
+	default:
+		// Unsupported event type
+	}
+	return ""
+}
+
+// ExtractPRURL is the legacy public function for GitHub PR URL extraction.
+// Kept for backward compatibility with tests.
+//
+//nolint:revive // Function name intentionally similar to extractPRURL for backward compatibility
+func ExtractPRURL(ctx context.Context, eventType string, payload map[string]any) string {
+	return extractGitHubPRURL(ctx, eventType, payload)
 }

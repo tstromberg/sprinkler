@@ -1,5 +1,3 @@
-// Package security provides security utilities for the webhook sprinkler,
-// including client IP extraction and User-Agent validation.
 package security
 
 import (

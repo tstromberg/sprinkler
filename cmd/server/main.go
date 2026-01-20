@@ -1,5 +1,6 @@
-// Package main implements githooksock, a GitHub webhook listener that provides
-// WebSocket subscriptions for pull request events to interested clients.
+// Package main implements webhook-sprinkler, a multi-platform webhook listener
+// (GitHub, GitLab, Gitea) that provides WebSocket subscriptions for pull request
+// and merge request events to interested clients.
 package main
 
 import (
@@ -27,8 +28,8 @@ const (
 	writeTimeout        = 10 * time.Second
 	idleTimeout         = 120 * time.Second
 	maxHeaderBytes      = 20  // Max header size multiplier (1 << 20 = 1MB)
-	minTokenLength      = 40  // Minimum GitHub token length
-	maxTokenLength      = 255 // Maximum GitHub token length
+	minTokenLength      = 20  // Minimum API token length
+	maxTokenLength      = 255 // Maximum API token length
 	minMaskHeaderLength = 20  // Minimum header length before we show full "[REDACTED]"
 )
 
@@ -41,7 +42,8 @@ const (
 )
 
 var (
-	webhookSecret = flag.String("webhook-secret", os.Getenv("GITHUB_WEBHOOK_SECRET"), "GitHub webhook secret for signature verification")
+	webhookSecret = flag.String("webhook-secret", os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		"Webhook secret for signature verification (also checks GITHUB_WEBHOOK_SECRET env)")
 	addr          = flag.String("addr", ":8080", "HTTP service address")
 	letsencrypt   = flag.Bool("letsencrypt", false, "Use Let's Encrypt for automatic TLS certificates")
 	leDomains     = flag.String("le-domains", "", "Comma-separated list of domains for Let's Encrypt certificates")
@@ -55,13 +57,16 @@ var (
 		}
 		return "*"
 	}(), "Comma-separated list of allowed webhook event types (use '*' for all, default: '*')")
+	allowedBaseURLs = flag.String("allowed-base-urls", os.Getenv("ALLOWED_BASE_URLS"),
+		"Comma-separated list of additional allowed base URLs for self-hosted Git instances (must be HTTPS). "+
+			"Set to empty string to allow any external endpoint (internal IPs always blocked).")
 	debugHeaders = flag.Bool("debug-headers", false, "Log request headers for debugging (security warning: may log sensitive data)")
 	enforceTiers = flag.Bool("enforce-tiers", func() bool {
 		if val := os.Getenv("ENFORCE_TIERS"); val != "" {
 			return val == "true" || val == "1"
 		}
 		return false
-	}(), "Enforce GitHub Marketplace tier restrictions (default: false, logs warnings only; can set via ENFORCE_TIERS env)")
+	}(), "Enforce tier restrictions (default: false, logs warnings only; can set via ENFORCE_TIERS env)")
 )
 
 //nolint:funlen,gocognit,lll,revive,maintidx // Main function orchestrates entire server setup and cannot be split without losing clarity
@@ -76,7 +81,7 @@ func main() {
 	// Validate webhook secret is configured (REQUIRED for security)
 	if webhookSecretValue == "" {
 		cancel()
-		log.Fatal("ERROR: Webhook secret is required for security. Set -webhook-secret or GITHUB_WEBHOOK_SECRET environment variable.")
+		log.Fatal("ERROR: Webhook secret is required for security. Set -webhook-secret flag or GITHUB_WEBHOOK_SECRET environment variable.")
 	}
 
 	// Parse allowed events
@@ -90,6 +95,44 @@ func main() {
 			allowedEventTypes[i] = strings.TrimSpace(allowedEventTypes[i])
 		}
 		log.Printf("Allowing webhook event types: %v", allowedEventTypes)
+	}
+
+	// Parse and validate custom base URLs
+	// nil slice = allow any external endpoint (whitelist disabled)
+	// empty slice after parsing = only defaults allowed
+	// slice with values = defaults + custom URLs allowed
+	var customBaseURLs []string
+
+	if *allowedBaseURLs == "" {
+		// Flag not set or explicitly empty - allow any external endpoint
+		customBaseURLs = nil
+		log.Println("Base URL whitelist DISABLED - allowing any external HTTPS endpoint (internal IPs blocked)")
+	} else {
+		// Parse comma-separated list
+		urls := strings.Split(*allowedBaseURLs, ",")
+		for _, u := range urls {
+			u = strings.TrimSpace(u)
+			if u == "" {
+				continue
+			}
+
+			// Validate each custom URL blocks internal IPs
+			validationCtx, validationCancel := context.WithTimeout(ctx, 5*time.Second)
+			if err := security.BlockInternalIPs(validationCtx, u); err != nil {
+				validationCancel()
+				cancel()
+				log.Fatalf("ERROR: Invalid custom base URL %q: %v", u, err)
+			}
+			validationCancel()
+
+			customBaseURLs = append(customBaseURLs, u)
+			log.Printf("Allowing custom base URL: %s", u)
+		}
+		if len(customBaseURLs) == 0 {
+			log.Println("Using default base URLs only (github.com, gitlab.com, codeberg.org, gitee.com)")
+		} else {
+			log.Printf("Allowing %d custom base URLs + defaults", len(customBaseURLs))
+		}
 	}
 
 	// Defer cancel after all fatal validations
@@ -152,7 +195,7 @@ func main() {
 	log.Println("Registered webhook handler at /webhook")
 
 	// WebSocket handler - exact match
-	wsHandler := srv.NewWebSocketHandler(hub, connLimiter, allowedEventTypes)
+	wsHandler := srv.NewWebSocketHandler(hub, connLimiter, allowedEventTypes, customBaseURLs)
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		startTime := time.Now()
 		ip := security.ClientIP(r)

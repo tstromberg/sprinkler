@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/codeGROOVE-dev/sprinkler/pkg/github"
 	"github.com/codeGROOVE-dev/sprinkler/pkg/logger"
+	"github.com/codeGROOVE-dev/sprinkler/pkg/platform"
+	"github.com/codeGROOVE-dev/sprinkler/pkg/security"
 )
 
 const (
@@ -29,6 +32,8 @@ var (
 
 // Subscription represents a client's subscription criteria.
 type Subscription struct {
+	Platform       string   `json:"platform,omitempty"` // "github", "gitlab", or "gitea" (defaults to "github")
+	BaseURL        string   `json:"base_url,omitempty"` // Instance URL (optional, defaults by platform)
 	Organization   string   `json:"organization"`
 	Username       string   `json:"-"`
 	EventTypes     []string `json:"event_types,omitempty"`
@@ -37,7 +42,8 @@ type Subscription struct {
 }
 
 // Validate performs security validation on subscription data.
-func (s *Subscription) Validate() error {
+// customAllowedBaseURLs is the list of additional allowed base URLs configured by the admin.
+func (s *Subscription) Validate(ctx context.Context, customAllowedBaseURLs []string) error {
 	// Organization is optional when subscribing to specific PRs or my events only
 	// The server will validate that the user has access to the resources
 	if s.Organization != "" {
@@ -91,15 +97,21 @@ func (s *Subscription) Validate() error {
 				return errors.New("PR URL too long")
 			}
 
-			// Basic validation - should be a GitHub PR URL
-			// Format: https://github.com/owner/repo/pull/number
-			if !strings.HasPrefix(u, "https://github.com/") {
-				return errors.New("invalid PR URL format")
+			// Basic validation - should be a valid PR/MR URL
+			// Supported formats:
+			// - GitHub: https://github.com/owner/repo/pull/number
+			// - GitLab: https://gitlab.com/owner/repo/-/merge_requests/number
+			// - Gitea: https://codeberg.org/owner/repo/pulls/number
+			if !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "http://") {
+				return errors.New("invalid PR URL format - must be https://")
 			}
 
-			// Check if it contains /pull/
-			if !strings.Contains(u, "/pull/") {
-				return errors.New("URL must be a pull request URL")
+			// Check if it contains pull request markers
+			isPR := strings.Contains(u, "/pull/") ||
+				strings.Contains(u, "/pulls/") ||
+				strings.Contains(u, "/merge_requests/")
+			if !isPR {
+				return errors.New("URL must be a pull request or merge request URL")
 			}
 
 			// Validate the URL can be parsed to prevent injection
@@ -113,6 +125,36 @@ func (s *Subscription) Validate() error {
 		}
 	}
 
+	// Validate base_url if specified
+	if s.BaseURL != "" {
+		if err := s.validateBaseURL(ctx, customAllowedBaseURLs); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateBaseURL checks base_url for security (SSRF) and whitelist compliance.
+func (s *Subscription) validateBaseURL(ctx context.Context, customAllowedBaseURLs []string) error {
+	platformType := platform.FromString(s.Platform)
+
+	// Always block internal IPs (even when whitelist is disabled)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := security.BlockInternalIPs(timeoutCtx, s.BaseURL); err != nil {
+		return fmt.Errorf("base_url security check failed: %w", err)
+	}
+
+	// Check whitelist (if enabled)
+	if !platform.IsAllowedBaseURL(platformType, s.BaseURL, customAllowedBaseURLs) {
+		return fmt.Errorf(
+			"base_url %q is not in the allowed list for platform %s - "+
+				"contact admin to add it via --allowed-base-urls flag",
+			s.BaseURL, s.Platform,
+		)
+	}
+
 	return nil
 }
 
@@ -123,28 +165,58 @@ type prURLInfo struct {
 	prNumber int
 }
 
-// parsePRUrl extracts owner, repo, and PR number from a GitHub PR URL.
+// parsePRUrl extracts owner, repo, and PR number from a PR/MR URL.
+// Supports GitHub, GitLab, and Gitea URL formats.
 func parsePRUrl(prURL string) (*prURLInfo, error) {
 	// Remove protocol
 	url := strings.TrimPrefix(prURL, "https://")
 	url = strings.TrimPrefix(url, "http://")
-	url = strings.TrimPrefix(url, "github.com/")
 
-	// Split by /
+	// Split by / and find the host boundary
 	parts := strings.Split(url, "/")
-	if len(parts) < minPRURLParts || parts[2] != "pull" {
+	if len(parts) < minPRURLParts+1 { // +1 for host
 		return nil, errors.New("invalid PR URL format")
 	}
 
-	owner := parts[0]
-	repo := parts[1]
+	// Skip the host (first part) to get to owner/repo
+	// For github.com/owner/repo/pull/123, parts are: [github.com, owner, repo, pull, 123]
+	// For custom.domain.com/owner/repo/pull/123, parts are: [custom.domain.com, owner, repo, pull, 123]
+	startIdx := 1 // Skip host
+	if len(parts) <= startIdx+1 {
+		return nil, errors.New("invalid PR URL format")
+	}
+
+	owner := parts[startIdx]
+	repo := parts[startIdx+1]
+
+	// Find the PR/MR marker and number (search from after repo)
+	var prIndex int
+	var numIndex int
+	for i := startIdx + 2; i < len(parts); i++ {
+		part := parts[i]
+		if part == "pull" || part == "pulls" || part == "merge_requests" {
+			// GitHub: /pull/123, Gitea: /pulls/123, GitLab: /-/merge_requests/123
+			prIndex = i
+			numIndex = i + 1
+			break
+		}
+	}
+
+	if prIndex == 0 || numIndex >= len(parts) {
+		return nil, errors.New("invalid PR URL format")
+	}
 
 	// Validate owner and repo don't contain dangerous characters
 	if owner == "" || repo == "" {
 		return nil, errors.New("empty owner or repo")
 	}
 
-	// GitHub usernames/orgs and repo names can only contain alphanumeric, dash, underscore, and dot
+	// Reject path traversal attempts
+	if owner == "." || owner == ".." || repo == "." || repo == ".." {
+		return nil, errors.New("invalid owner or repo name")
+	}
+
+	// Validate names (alphanumeric, dash, underscore, dot)
 	for _, c := range owner {
 		valid := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'
 		if !valid {
@@ -160,7 +232,7 @@ func parsePRUrl(prURL string) (*prURLInfo, error) {
 
 	// Parse PR number
 	var num int
-	if _, err := fmt.Sscanf(parts[3], "%d", &num); err != nil {
+	if _, err := fmt.Sscanf(parts[numIndex], "%d", &num); err != nil {
 		return nil, errors.New("invalid PR number")
 	}
 
@@ -244,21 +316,6 @@ func matchesPRSubscription(sub Subscription, payload map[string]any, eventOrg st
 	return false
 }
 
-// extractRepoInfo extracts repository private status and full name from webhook payload.
-// Returns (private, fullName, ok) where ok is false if repository data is missing.
-//
-//nolint:errcheck,revive // Type assertions intentionally unchecked; defaults are correct
-func extractRepoInfo(payload map[string]any) (private bool, fullName string, ok bool) {
-	repoData, ok := payload["repository"].(map[string]any)
-	if !ok {
-		return false, "", false
-	}
-
-	private, _ = repoData["private"].(bool)
-	fullName, _ = repoData["full_name"].(string)
-	return private, fullName, true
-}
-
 // matchesForTest is a test helper that creates a minimal client for testing.
 // This maintains backward compatibility with existing tests.
 func matchesForTest(sub Subscription, event Event, payload map[string]any, userOrgs map[string]bool) bool {
@@ -280,26 +337,31 @@ func matches(ctx context.Context, client *Client, event Event, payload map[strin
 	userOrgs := client.userOrgs
 
 	// Filter private repo events based on tier
-	if private, repoName, ok := extractRepoInfo(payload); ok && private {
-		if !client.CanAccessPrivateRepos() {
-			if client.hub.enforceTiers {
-				// Enforcement is active - actually filter the event
-				logger.Info(ctx, "filtering private repo event (tier enforcement active)", logger.Fields{
+	//nolint:errcheck,revive // Type assertions intentionally unchecked; defaults are correct
+	if repoData, ok := payload["repository"].(map[string]any); ok {
+		private, _ := repoData["private"].(bool)
+		repoName, _ := repoData["full_name"].(string)
+		if private {
+			if !client.CanAccessPrivateRepos() {
+				if client.hub.enforceTiers {
+					// Enforcement is active - actually filter the event
+					logger.Info(ctx, "filtering private repo event (tier enforcement active)", logger.Fields{
+						"user":       sub.Username,
+						"tier":       string(client.tier),
+						"repo":       repoName,
+						"event_type": event.Type,
+					})
+					return false
+				}
+				// Enforcement not active - log warning but allow event through
+				logger.Warn(ctx, "would filter private repo event if enforcement was active", logger.Fields{
 					"user":       sub.Username,
 					"tier":       string(client.tier),
 					"repo":       repoName,
 					"event_type": event.Type,
+					"suggestion": "upgrade to Pro or Flock tier for private repo access",
 				})
-				return false
 			}
-			// Enforcement not active - log warning but allow event through
-			logger.Warn(ctx, "would filter private repo event if enforcement was active", logger.Fields{
-				"user":       sub.Username,
-				"tier":       string(client.tier),
-				"repo":       repoName,
-				"event_type": event.Type,
-				"suggestion": "upgrade to Pro or Flock tier for private repo access",
-			})
 		}
 	}
 
